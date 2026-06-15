@@ -120,6 +120,7 @@ struct RunTI2V5B {
                 print("\ngen: \(w)×\(h), \(nf) frames, \(st) steps …")
                 let t0 = Date()
                 var firstNaN = -1
+                var denoisePeak = 0
                 let frames = try pipe.t2v(
                     prompt: "a golden retriever puppy running across a sunny meadow, "
                         + "cinematic, shallow depth of field",
@@ -127,11 +128,15 @@ struct RunTI2V5B {
                 ) { i, total, latent in
                     let mx = latent.abs().max().item(Float.self)
                     if !mx.isFinite && firstNaN < 0 { firstNaN = i }
+                    denoisePeak = Memory.peakMemory  // last step → denoise-phase peak (pre-decode)
                     print("  step \(i + 1)/\(total)  |latent|max=\(mx)  (\(String(format: "%.0f", -t0.timeIntervalSinceNow))s)")
                 }
                 if firstNaN >= 0 { print("  ⚠️ latent first non-finite at step \(firstNaN + 1)") }
                 eval(frames)
                 let secs = -t0.timeIntervalSinceNow
+                print("  [profile] denoise peak \(String(format: "%.1f", Double(denoisePeak)/1e9)) GB → "
+                    + "final \(String(format: "%.1f", Double(Memory.peakMemory)/1e9)) GB "
+                    + "(decode +\(String(format: "%.1f", Double(Memory.peakMemory - denoisePeak)/1e9)) GB)")
                 let lo = frames.min().item(Float.self), hi = frames.max().item(Float.self)
                 let peakGB = Double(Memory.peakMemory) / 1e9
                 let outURL = FileManager.default.temporaryDirectory

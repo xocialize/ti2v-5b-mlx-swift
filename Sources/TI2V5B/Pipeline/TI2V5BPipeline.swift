@@ -63,6 +63,9 @@ public final class TI2V5BPipeline: @unchecked Sendable {
         }
         var ditWeights = try WeightLoader.loadSafetensors(
             url: modelDir.appendingPathComponent("model.safetensors"))
+        // int4 checkpoints carry a stray serialized `freqs` RoPE table the model never
+        // loads (computed from buffers) — drop it (matches Bernini's toleratedExtras).
+        ditWeights = ditWeights.filter { $0.key != "freqs" }
         if quantization == nil, ditDType == .float32 {
             ditWeights = ditWeights.mapValues { $0.asType(.float32) }  // video-scale correctness
         }
