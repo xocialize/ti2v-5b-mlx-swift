@@ -30,17 +30,22 @@ public final class MLXTI2V5BPackage: ModelPackage {
                 tier: 1
             ),
             requirements: RequirementsManifest(
-                // Measured (DEV_ARCHIVE TI2V-5B sweep @480p): bf16 ≈40 GB, int4 ≈33 GB
-                // peak. Declarations sit just above. The 16 GB consumer floor is gated on
-                // §2.4 umT5 eviction (built) + streaming vae22 decode + sequential DiT
-                // eviction — a future lighter footprint, not the as-shipped figure.
+                // CORRECTED 2026-06-14: the early bf16 ≈40 / int4 ≈33 GB figures were for the
+                // BROKEN bf16 path (Metal bf16 over-grows the latent at video-scale seqLen →
+                // garbage). Correct output runs the DiT in fp32 COMPUTE. Re-measured peak
+                // (`RunTI2V5B gen`, 512²×17, M5 Max): the bf16 checkpoint → fp32 compute ≈54 GB;
+                // the int4 checkpoint → int4-weights + fp32-activations ≈37 GB (the lighter,
+                // correct consumer path). These are the WORKING SET at a 512²-class config;
+                // 720p is much higher (the fp32 activations at seqLen 18480 are the wall →
+                // chunked attention + streaming vae22 decode are the open memory work, NOT yet
+                // reflected here). Static-manifest caveat: one figure per quant, not per-res.
                 footprints: [
-                    QuantFootprint(quant: .bf16, residentBytes: 42_000_000_000),
-                    QuantFootprint(quant: .int4, residentBytes: 35_000_000_000),
+                    QuantFootprint(quant: .bf16, residentBytes: 56_000_000_000),  // → fp32 compute
+                    QuantFootprint(quant: .int4, residentBytes: 40_000_000_000),
                 ],
                 requiredBackends: [.metalGPU],
                 os: OSRequirement(minMacOS: SemanticVersion(major: 26, minor: 0, patch: 0)),
-                chipFloor: .pro
+                chipFloor: .max
             ),
             specialties: [
                 SpecialtyWeight(.general, strength: 0.6),
