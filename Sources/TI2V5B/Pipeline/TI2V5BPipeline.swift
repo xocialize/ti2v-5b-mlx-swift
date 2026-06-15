@@ -199,12 +199,16 @@ public final class TI2V5BPipeline: @unchecked Sendable {
     }
 
     /// Decode a channels-first DiT latent [C, T_lat, H_lat, W_lat] through vae22:
-    /// → channels-last [1, T_lat, H_lat, W_lat, C] → denormalize → decode → frames
-    /// [1, T', H', W', 3] in [-1, 1]. Run on the CPU stream (fp32 VAE, watchdog-safe).
+    /// → channels-last [1, T_lat, H_lat, W_lat, C] → denormalize → STREAMING decode →
+    /// frames [1, T', H', W', 3] in [-1, 1]. Run on the CPU stream (fp32 VAE).
+    ///
+    /// Uses `decodeStreaming22` (temporal-chunked, bit-identical to whole-seq) — the
+    /// whole-sequence decode costs ~27 GB PER LATENT FRAME and OOMs at video length;
+    /// chunking to 1 latent frame caps the decode peak ~flat (the 720p memory unlock).
     func decodeLatent(_ latent: MLXArray) -> MLXArray {
         Device.withDefaultDevice(.cpu) {
             let z = latent.transposed(1, 2, 3, 0).expandedDimensions(axis: 0)
-            let video = vaeDecoder(denormalizeLatents22(z))
+            let video = decodeStreaming22(vaeDecoder, denormalizeLatents22(z))
             eval(video)
             return video
         }
