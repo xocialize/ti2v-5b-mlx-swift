@@ -17,19 +17,24 @@ import WanCore
 
 public final class TI2V5BPipeline: @unchecked Sendable {
     public let config: WanConfig
-    /// Single-expert Wan DiT (TI2V-5B is `dual_model: false`).
-    public let dit: WanModel
+    /// Single-expert Wan DiT (`dual_model: false`). nil when `pageDiT` — then it is
+    /// loaded per request and evicted before the VAE decode (§2.12 max-phase residency:
+    /// only one heavy component — umT5 OR DiT OR VAE — resident at a time).
+    public let dit: WanModel?
     /// 48-ch channels-last vae22 — decode (latent→frames) and encode (i2v image→latent).
     public let vaeDecoder: Wan22VAEDecoder
     public let vaeEncoder: Wan22VAEEncoder
-    /// Checkpoint dir — kept so umT5 can be (re)loaded per request and evicted before
-    /// denoise (§2.4), rather than held resident.
+    /// Checkpoint dir — kept so umT5 (always) and the DiT (when `pageDiT`) can be
+    /// (re)loaded per request and evicted, rather than held resident (§2.4 / §2.12).
     public let modelDir: URL
     public let tokenizer: any Tokenizer
+    let quantization: WanQuantization?
+    let ditDType: DType
 
     public init(
-        config: WanConfig, dit: WanModel, vaeDecoder: Wan22VAEDecoder,
-        vaeEncoder: Wan22VAEEncoder, modelDir: URL, tokenizer: any Tokenizer
+        config: WanConfig, dit: WanModel?, vaeDecoder: Wan22VAEDecoder,
+        vaeEncoder: Wan22VAEEncoder, modelDir: URL, tokenizer: any Tokenizer,
+        quantization: WanQuantization?, ditDType: DType
     ) {
         self.config = config
         self.dit = dit
@@ -37,6 +42,8 @@ public final class TI2V5BPipeline: @unchecked Sendable {
         self.vaeEncoder = vaeEncoder
         self.modelDir = modelDir
         self.tokenizer = tokenizer
+        self.quantization = quantization
+        self.ditDType = ditDType
     }
 
     /// Load all components from a converted checkpoint directory (flat layout:
@@ -48,32 +55,23 @@ public final class TI2V5BPipeline: @unchecked Sendable {
     ///   over-grows; fp32 matches the oracle). bf16 is fine only for small-seqLen (e.g.
     ///   single-frame t2i) — pass `.bfloat16` there to halve the DiT footprint. Ignored
     ///   for quantized checkpoints (the quant path owns dtype).
+    /// - pageDiT: when true, the DiT is NOT held resident — it is paged in per request
+    ///   for denoise and evicted before the VAE decode (§2.12 max-phase: peak =
+    ///   max(umT5, DiT, decode) not their sum). The consumer-tier memory lever (costs a
+    ///   ~per-generation DiT reload). Default false (DiT resident — faster for repeated
+    ///   runs / high-memory tiers).
     public static func fromPretrained(
         modelDir: URL, quantization explicitQuantization: WanQuantization? = nil,
-        ditDType: DType = .float32
+        ditDType: DType = .float32, pageDiT: Bool = false
     ) async throws -> TI2V5BPipeline {
         let config = try WanConfig.load(
             from: modelDir.appendingPathComponent("config.json"))
         let quantization = explicitQuantization ?? config.quantization
 
-        // --- DiT (single expert) ---
-        let dit = WanModel(config)
-        if let quantization {
-            WeightLoader.applyQuantization(to: dit, quantization: quantization)
-        }
-        var ditWeights = try WeightLoader.loadSafetensors(
-            url: modelDir.appendingPathComponent("model.safetensors"))
-        // int4 checkpoints carry a stray serialized `freqs` RoPE table the model never
-        // loads (computed from buffers) — drop it (matches Bernini's toleratedExtras).
-        ditWeights = ditWeights.filter { $0.key != "freqs" }
-        if quantization == nil, ditDType == .float32 {
-            ditWeights = ditWeights.mapValues { $0.asType(.float32) }  // video-scale correctness
-        }
-        WeightLoader.materialize(ditWeights)
-        try dit.update(
-            parameters: ModuleParameters.unflattened(ditWeights),
-            verify: [.noUnusedKeys])
-        eval(dit.parameters())
+        // DiT: resident now, or paged per request when pageDiT.
+        let dit = pageDiT
+            ? nil
+            : try loadDiT(modelDir: modelDir, config: config, quantization: quantization, ditDType: ditDType)
 
         // --- vae22 (fp32), decoder + encoder from the one vae.safetensors ---
         let (vaeDecoder, vaeEncoder) = try loadVAE(
@@ -83,7 +81,43 @@ public final class TI2V5BPipeline: @unchecked Sendable {
         let tokenizer = try await AutoTokenizer.from(pretrained: umt5TokenizerRepo)
         return TI2V5BPipeline(
             config: config, dit: dit, vaeDecoder: vaeDecoder, vaeEncoder: vaeEncoder,
-            modelDir: modelDir, tokenizer: tokenizer)
+            modelDir: modelDir, tokenizer: tokenizer,
+            quantization: quantization, ditDType: ditDType)
+    }
+
+    /// Build + load a single-expert DiT (fp32 compute for video-scale correctness; int4
+    /// keeps the quant path). Drops the stray int4 `freqs` table.
+    static func loadDiT(
+        modelDir: URL, config: WanConfig, quantization: WanQuantization?, ditDType: DType
+    ) throws -> WanModel {
+        let dit = WanModel(config)
+        if let quantization {
+            WeightLoader.applyQuantization(to: dit, quantization: quantization)
+        }
+        var ditWeights = try WeightLoader.loadSafetensors(
+            url: modelDir.appendingPathComponent("model.safetensors"))
+        ditWeights = ditWeights.filter { $0.key != "freqs" }
+        if quantization == nil, ditDType == .float32 {
+            ditWeights = ditWeights.mapValues { $0.asType(.float32) }
+        }
+        WeightLoader.materialize(ditWeights)
+        try dit.update(
+            parameters: ModuleParameters.unflattened(ditWeights), verify: [.noUnusedKeys])
+        eval(dit.parameters())
+        return dit
+    }
+
+    /// Run `body` with the DiT (resident, or paged-in then evicted before return — the
+    /// §2.12 lever). ⚠️ `body` MUST `eval` everything it returns (else the latent holds
+    /// the DiT graph past the evict, defeating it).
+    func withDiT<R>(_ body: (WanModel) throws -> R) throws -> R {
+        if let dit { return try body(dit) }  // resident
+        var paged: WanModel? = try Self.loadDiT(
+            modelDir: modelDir, config: config, quantization: quantization, ditDType: ditDType)
+        let result = try body(paged!)
+        paged = nil
+        MLX.GPU.clearCache()  // reclaim the ~20 GB (fp32) before the VAE decode
+        return result
     }
 
     /// Build + load both vae22 halves (decoder uses `decoder.`/`conv2.` keys, encoder
@@ -178,11 +212,15 @@ public final class TI2V5BPipeline: @unchecked Sendable {
         if let seed { MLXRandom.seed(seed) }
         let noise = MLXRandom.normal([config.vaeZDim, tLat, hLat, wLat])
 
-        let latent = try denoiseTI2V(
-            dit: dit, config: config, contextCond: contextCond, contextNull: contextNull,
-            noise: noise, steps: steps ?? config.sampleSteps, shift: config.sampleShift,
-            guideScale: guideScale ?? (config.sampleGuideScale.first ?? 5.0),
-            scheduler: scheduler, onStep: onStep)
+        let latent = try withDiT { dit -> MLXArray in
+            let l = try denoiseTI2V(
+                dit: dit, config: config, contextCond: contextCond, contextNull: contextNull,
+                noise: noise, steps: steps ?? config.sampleSteps, shift: config.sampleShift,
+                guideScale: guideScale ?? (config.sampleGuideScale.first ?? 5.0),
+                scheduler: scheduler, onStep: onStep)
+            eval(l)  // §2.12: materialize before the DiT is evicted for the decode
+            return l
+        }
 
         return decodeLatent(latent)
     }
@@ -259,13 +297,17 @@ public final class TI2V5BPipeline: @unchecked Sendable {
         if let seed { MLXRandom.seed(seed) }
         let noise = MLXRandom.normal([config.vaeZDim, tLat, hLat, wLat])
 
-        let latent = try denoiseTI2V(
-            dit: dit, config: config, contextCond: contextCond, contextNull: contextNull,
-            noise: noise, steps: steps ?? config.sampleSteps, shift: config.sampleShift,
-            guideScale: guideScale ?? (config.sampleGuideScale.first ?? 5.0),
-            scheduler: scheduler,
-            i2v: I2VCondition(zImg: zImg, mask: mask, maskTokens: maskTokens),
-            onStep: onStep)
+        let latent = try withDiT { dit -> MLXArray in
+            let l = try denoiseTI2V(
+                dit: dit, config: config, contextCond: contextCond, contextNull: contextNull,
+                noise: noise, steps: steps ?? config.sampleSteps, shift: config.sampleShift,
+                guideScale: guideScale ?? (config.sampleGuideScale.first ?? 5.0),
+                scheduler: scheduler,
+                i2v: I2VCondition(zImg: zImg, mask: mask, maskTokens: maskTokens),
+                onStep: onStep)
+            eval(l)  // §2.12: materialize before the DiT is evicted for the decode
+            return l
+        }
 
         return decodeLatent(latent)
     }

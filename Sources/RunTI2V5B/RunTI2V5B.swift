@@ -72,12 +72,16 @@ struct RunTI2V5B {
 
         do {
             print("Loading TI2V-5B from \(modelDir.lastPathComponent) …")
-            let pipe = try await TI2V5BPipeline.fromPretrained(modelDir: modelDir)
+            // PAGE_DIT=1 → §2.12 sequential DiT eviction (paged per request, freed before decode).
+            let pageDiT = ProcessInfo.processInfo.environment["PAGE_DIT"] != nil
+            let pipe = try await TI2V5BPipeline.fromPretrained(modelDir: modelDir, pageDiT: pageDiT)
             let c = pipe.config
             print("✓ config: dim=\(c.dim) layers=\(c.numLayers) heads=\(c.numHeads) "
                 + "in/out=\(c.inDim)/\(c.outDim) patch=\(c.patchSize) "
                 + "dual=\(c.dualModel) vaeZ=\(c.vaeZDim)")
-            print("✓ DiT (WanModel) loaded: \(pipe.dit.blocks.count) blocks, dim \(pipe.dit.dim)")
+            print("✓ DiT (WanModel): "
+                + (pipe.dit.map { "resident, \($0.blocks.count) blocks, dim \($0.dim)" }
+                    ?? "paged per request (evicted before decode)"))
             print("✓ vae22 decoder + encoder loaded (fp32)")
             print("✓ tokenizer: umt5-xxl   ✓ §2.4 umT5 eviction wired")
 
