@@ -253,11 +253,15 @@ public final class TI2V5BPipeline: @unchecked Sendable {
         // it is `Memory.cacheLimit`: with a low/zero limit MLX reclaims freed buffers on
         // the NEXT allocation instead of caching them, so the cache never accumulates to
         // the peak → phys collapses toward the ~76 GB active set. Scoped to the decode and
-        // restored after (denoise already clears per-step). Env `DECODE_CACHE_MB` tunes the
-        // cap (default 0 = fully disabled, the maximal-reclaim measurement); raise it if the
-        // realloc churn costs too much wall time once admission is proven.
+        // restored after (denoise already clears per-step).
+        //
+        // DEFAULT 2048 MB (measured 2026-06-15, int4 5f @ 720p): a 2 GB working cache holds phys at
+        // the SAME 41.1 GB as a zero cap (the 2 GB doesn't accumulate into the high-water) while
+        // giving the BEST wall time — 172.4 s vs 211.8 s at cap=0 (−19%, dodges the zero-cap realloc
+        // churn) and even vs 195.8 s uncapped (the bounded cache also avoids the unbounded default's
+        // fragmentation). Env `DECODE_CACHE_MB` overrides (0 = max reclaim; raise for more reuse).
         let prevCacheLimit = Memory.cacheLimit
-        let capMB = ProcessInfo.processInfo.environment["DECODE_CACHE_MB"].flatMap { Int($0) } ?? 0
+        let capMB = ProcessInfo.processInfo.environment["DECODE_CACHE_MB"].flatMap { Int($0) } ?? 2048
         Memory.cacheLimit = capMB * 1_000_000
         defer { Memory.cacheLimit = prevCacheLimit }
         MLX.GPU.clearCache()  // drop the denoise cache before the capped decode begins
