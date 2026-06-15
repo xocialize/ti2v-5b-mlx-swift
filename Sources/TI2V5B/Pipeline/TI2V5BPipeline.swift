@@ -197,8 +197,10 @@ public final class TI2V5BPipeline: @unchecked Sendable {
         }
     }
 
-    /// Image+text-to-video. As t2v, but the input image is vae22-encoded to a latent
-    /// and used as i2v conditioning (concatenated / masked into the noised latent).
+    /// Image+text-to-video (TI2V-5B mask-blend conditioning). The input image is
+    /// vae22-encoded to a normalized latent that occupies (and stays frozen at) video
+    /// frame 0; the rest is generated. Per the oracle, TI2V-5B uses MASK-BLEND (not the
+    /// channel-concat `y:` path). Returns frames [1, T', H', W', 3] in [-1, 1].
     /// - Parameter image: [1, 1, H, W, 3] in [-1, 1] (channels-last).
     public func i2v(
         image: MLXArray,
@@ -207,13 +209,47 @@ public final class TI2V5BPipeline: @unchecked Sendable {
         numFrames: Int = TI2V5BDefaults.numFrames,
         steps: Int? = nil,
         guideScale: Double? = nil,
-        seed: UInt64? = nil
+        scheduler: TI2VScheduler = .unipc,
+        seed: UInt64? = nil,
+        onStep: ((Int, Int, MLXArray) throws -> Void)? = nil
     ) throws -> MLXArray {
-        // Wiring sketch (task #12):
-        //   let condLatent = vaeEncoder(image)          // i2v conditioning latent
-        //   let contexts = try withTextEncoder { ... }
-        //   let latent = denoise(contexts, condLatent, ...)
-        //   return vaeDecoder(denormalizeLatents22(latent))
-        throw TI2V5BError.notImplemented("i2v conditioning + denoise — task #12")
+        let negative = negativePrompt ?? config.sampleNegPrompt
+
+        // §2.4: encode cond/uncond, evict umT5 before denoise.
+        let (contextCond, contextNull) = try withTextEncoder { enc -> (MLXArray, MLXArray) in
+            let c = encodeText(
+                encoder: enc, tokenizer: tokenizer, prompt: prompt, textLen: config.textLen)
+            let n = encodeText(
+                encoder: enc, tokenizer: tokenizer, prompt: negative, textLen: config.textLen)
+            eval(c, n)
+            return (c, n)
+        }
+
+        // vae22-encode the image → normalized latent, channels-first [C, 1, Hl, Wl].
+        let zImg = Device.withDefaultDevice(.cpu) { () -> MLXArray in
+            let zCL = vaeEncoder(image)             // [1, 1, Hl, Wl, C] normalized
+            let z = zCL[0].transposed(3, 0, 1, 2)   // [C, 1, Hl, Wl]
+            eval(z)
+            return z
+        }
+        let (hLat, wLat) = (zImg.dim(2), zImg.dim(3))
+        let tLat = (numFrames - 1) / config.vaeStride[0] + 1
+
+        let (mask, maskTokens) = buildI2VMask(
+            channels: config.vaeZDim, tLat: tLat, hLat: hLat, wLat: wLat,
+            patchSize: config.patchSize)
+
+        if let seed { MLXRandom.seed(seed) }
+        let noise = MLXRandom.normal([config.vaeZDim, tLat, hLat, wLat])
+
+        let latent = try denoiseTI2V(
+            dit: dit, config: config, contextCond: contextCond, contextNull: contextNull,
+            noise: noise, steps: steps ?? config.sampleSteps, shift: config.sampleShift,
+            guideScale: guideScale ?? (config.sampleGuideScale.first ?? 5.0),
+            scheduler: scheduler,
+            i2v: I2VCondition(zImg: zImg, mask: mask, maskTokens: maskTokens),
+            onStep: onStep)
+
+        return decodeLatent(latent)
     }
 }

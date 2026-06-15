@@ -18,6 +18,41 @@ public enum TI2VScheduler: String, Sendable {
     case dpmpp
 }
 
+/// TI2V-5B i2v mask-blend conditioning (channels-first latent space).
+/// - zImg: the vae22-encoded, NORMALIZED conditioning image latent [C, 1, H, W].
+/// - mask: [C, T, H, W] — 0 at t=0 (frozen image frame), 1 elsewhere (denoised).
+/// - maskTokens: [1, L] — 0 for first-frame tokens, 1 for the rest (per-token timesteps).
+public struct I2VCondition {
+    public let zImg: MLXArray
+    public let mask: MLXArray
+    public let maskTokens: MLXArray
+    public init(zImg: MLXArray, mask: MLXArray, maskTokens: MLXArray) {
+        self.zImg = zImg
+        self.mask = mask
+        self.maskTokens = maskTokens
+    }
+}
+
+/// Build the i2v temporal mask + token mask. The image occupies latent frame 0
+/// (frozen); the rest is generated. Token order is (f, h, w) f-major, matching the
+/// DiT patchify, so the first `hGrid*wGrid` tokens are the (clean) image frame.
+public func buildI2VMask(
+    channels c: Int, tLat: Int, hLat: Int, wLat: Int, patchSize: [Int]
+) -> (mask: MLXArray, maskTokens: MLXArray) {
+    let zeros = MLXArray.zeros([c, 1, hLat, wLat])
+    let mask = tLat > 1
+        ? concatenated([zeros, MLXArray.ones([c, tLat - 1, hLat, wLat])], axis: 1)
+        : zeros
+    let hGrid = hLat / patchSize[1]
+    let wGrid = wLat / patchSize[2]
+    let fGrid = tLat / patchSize[0]
+    let frameTokens = hGrid * wGrid
+    let seqLen = fGrid * frameTokens
+    var mt = [Float](repeating: 1, count: seqLen)
+    for k in 0..<min(frameTokens, seqLen) { mt[k] = 0 }  // frame-0 tokens clean
+    return (mask, MLXArray(mt, [1, seqLen]))
+}
+
 /// Run the single-expert CFG denoising loop and return the final latent
 /// [C, T_lat, H_lat, W_lat] (channels-first).
 /// - contextCond/contextNull: raw UMT5 features [L, text_dim].
@@ -33,6 +68,7 @@ public func denoiseTI2V(
     shift: Double,
     guideScale: Double,
     scheduler: TI2VScheduler = .unipc,
+    i2v: I2VCondition? = nil,
     onStep: ((Int, Int, MLXArray) throws -> Void)? = nil
 ) rethrows -> MLXArray {
     let cfg = guideScale > 1.0
@@ -65,18 +101,36 @@ public func denoiseTI2V(
     let timesteps = unipc?.timesteps ?? euler?.timesteps ?? dpmpp!.timesteps
 
     var latents = noise
+    // i2v: blend the frozen image latent into frame 0 before denoising.
+    if let i2v { latents = (1 - i2v.mask) * i2v.zImg + i2v.mask * latents }
+
     for i in 0..<steps {
         let t = Double(timesteps[i])
+
+        // Timestep: scalar [B] (t2v) or per-token [B, seqLen] (i2v — frame-0 tokens
+        // get t=0 i.e. already-clean, the rest get the full step timestep).
+        func timestepArray(batch: Int) -> MLXArray {
+            guard let i2v else {
+                return MLXArray(Array(repeating: Float(t), count: batch))
+            }
+            var tTokens = i2v.maskTokens * Float(t)  // [1, Lmasked]
+            let padLen = seqLen - tTokens.dim(1)
+            if padLen > 0 {
+                let pad = MLXArray(Array(repeating: Float(t), count: padLen), [1, padLen])
+                tTokens = concatenated([tTokens, pad], axis: 1)
+            }
+            return batch == 1 ? tTokens : concatenated([tTokens, tTokens], axis: 0)
+        }
+
         let noisePred: MLXArray
         if cfg {
-            let tBatch = MLXArray([Float(t), Float(t)])
             let preds = dit(
-                [latents, latents], t: tBatch, context: .embedded(contextCfg),
+                [latents, latents], t: timestepArray(batch: 2), context: .embedded(contextCfg),
                 seqLen: seqLen, crossKVCaches: crossKV, ropeCosSin: ropeCosSin)
             noisePred = preds[1] + Float(guideScale) * (preds[0] - preds[1])
         } else {
             let preds = dit(
-                [latents], t: MLXArray([Float(t)]), context: .embedded(contextCfg),
+                [latents], t: timestepArray(batch: 1), context: .embedded(contextCfg),
                 seqLen: seqLen, crossKVCaches: crossKV, ropeCosSin: ropeCosSin)
             noisePred = preds[0]
         }
@@ -92,6 +146,8 @@ public func denoiseTI2V(
             stepped = dpmpp!.step(modelOutput: predB, timestep: Float(t), sample: sampleB)
         }
         latents = stepped.squeezed(axis: 0)
+        // i2v: re-freeze the image frame after each step.
+        if let i2v { latents = (1 - i2v.mask) * i2v.zImg + i2v.mask * latents }
 
         eval(latents)
         MLX.GPU.clearCache()  // per-step buffer-cache discipline (long configs)
