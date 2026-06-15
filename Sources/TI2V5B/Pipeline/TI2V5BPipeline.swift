@@ -42,20 +42,30 @@ public final class TI2V5BPipeline: @unchecked Sendable {
     /// Load all components from a converted checkpoint directory (flat layout:
     /// `model.safetensors` + `vae.safetensors` + `t5_encoder.safetensors` +
     /// `config.json`). The tokenizer comes from google/umt5-xxl (HF), like mlx-video.
+    /// - ditDType: the DiT compute precision. Defaults to **fp32** — REQUIRED for correct
+    ///   video-scale (large-seqLen) output: Metal bf16 attention over long sequences is
+    ///   numerically unstable (NaN) AND, even mitigated, too imprecise (the latent
+    ///   over-grows; fp32 matches the oracle). bf16 is fine only for small-seqLen (e.g.
+    ///   single-frame t2i) — pass `.bfloat16` there to halve the DiT footprint. Ignored
+    ///   for quantized checkpoints (the quant path owns dtype).
     public static func fromPretrained(
-        modelDir: URL, quantization explicitQuantization: WanQuantization? = nil
+        modelDir: URL, quantization explicitQuantization: WanQuantization? = nil,
+        ditDType: DType = .float32
     ) async throws -> TI2V5BPipeline {
         let config = try WanConfig.load(
             from: modelDir.appendingPathComponent("config.json"))
         let quantization = explicitQuantization ?? config.quantization
 
-        // --- DiT (single expert), checkpoint dtype (bf16) ---
+        // --- DiT (single expert) ---
         let dit = WanModel(config)
         if let quantization {
             WeightLoader.applyQuantization(to: dit, quantization: quantization)
         }
-        let ditWeights = try WeightLoader.loadSafetensors(
+        var ditWeights = try WeightLoader.loadSafetensors(
             url: modelDir.appendingPathComponent("model.safetensors"))
+        if quantization == nil, ditDType == .float32 {
+            ditWeights = ditWeights.mapValues { $0.asType(.float32) }  // video-scale correctness
+        }
         WeightLoader.materialize(ditWeights)
         try dit.update(
             parameters: ModuleParameters.unflattened(ditWeights),
