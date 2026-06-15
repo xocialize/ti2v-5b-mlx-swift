@@ -244,13 +244,23 @@ public final class TI2V5BPipeline: @unchecked Sendable {
     /// whole-sequence decode costs ~27 GB PER LATENT FRAME and OOMs at video length;
     /// chunking to 1 latent frame caps the decode peak ~flat (the 720p memory unlock).
     func decodeLatent(_ latent: MLXArray) -> MLXArray {
-        // Return the denoise phase's cached-but-freed GPU buffers to the OS BEFORE the
-        // decode. phys_footprint (the governor's basis) tracks MLX's buffer-cache
-        // high-water, not just active allocations — so without this the ~30 GB denoise
-        // cache stays mapped and stacks onto the decode peak. This `clearCache` (not DiT
-        // residency) is the operative phys lever; works whether the DiT is resident or
-        // paged. (`latent` is still referenced, so it survives the clear.)
-        MLX.GPU.clearCache()
+        // phys_footprint (the governor's basis) tracks MLX's buffer-cache high-water, NOT
+        // just live allocations — and the decisive datapoint is that GPU *active* peak is
+        // ~76 GB while phys is ~110: the ~34 GB delta is the buffer CACHE (freed full-res
+        // 1024-ch conv intermediates MLX retains for reuse). A `clearCache` can't cap it —
+        // the peak is transient *inside* the decode (and at 5f the decode is a single
+        // chunk, so a per-chunk clear has no boundary to fire at). The cap that DOES bound
+        // it is `Memory.cacheLimit`: with a low/zero limit MLX reclaims freed buffers on
+        // the NEXT allocation instead of caching them, so the cache never accumulates to
+        // the peak → phys collapses toward the ~76 GB active set. Scoped to the decode and
+        // restored after (denoise already clears per-step). Env `DECODE_CACHE_MB` tunes the
+        // cap (default 0 = fully disabled, the maximal-reclaim measurement); raise it if the
+        // realloc churn costs too much wall time once admission is proven.
+        let prevCacheLimit = Memory.cacheLimit
+        let capMB = ProcessInfo.processInfo.environment["DECODE_CACHE_MB"].flatMap { Int($0) } ?? 0
+        Memory.cacheLimit = capMB * 1_000_000
+        defer { Memory.cacheLimit = prevCacheLimit }
+        MLX.GPU.clearCache()  // drop the denoise cache before the capped decode begins
         return Device.withDefaultDevice(.cpu) {
             let z = latent.transposed(1, 2, 3, 0).expandedDimensions(axis: 0)
             let video = decodeStreaming22(vaeDecoder, denormalizeLatents22(z))
