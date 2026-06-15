@@ -48,5 +48,15 @@ let package = Package(
             ],
             path: "Sources/RunTI2V5B"
         ),
+        .testTarget(
+            name: "TI2V5BTests",
+            dependencies: [
+                "TI2V5B",
+                .product(name: "WanCore", package: "wan-core-mlx-swift"),
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
+            ],
+            path: "Tests/TI2V5BTests"
+        ),
     ]
 )
