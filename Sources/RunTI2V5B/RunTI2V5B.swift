@@ -11,6 +11,7 @@ import Foundation
 import ImageIO
 import MLX
 import TI2V5B
+import Tokenizers
 import UniformTypeIdentifiers
 import WanCore
 
@@ -40,6 +41,19 @@ struct RunTI2V5B {
     static func main() async {
         let args = CommandLine.arguments
         let mode = args.count > 1 ? args[1] : "load"
+
+        // Tokenizer-only parity check (no model load).
+        if mode == "tok" {
+            let prompt = args.count > 2
+                ? args[2] : "a golden retriever puppy running across a sunny meadow"
+            do {
+                let tok = try await AutoTokenizer.from(pretrained: "google/umt5-xxl")
+                let ids = tok.encode(text: prompt)
+                print("Swift tokenizer (\(ids.count) ids): \(ids)")
+            } catch { print("✗ tokenizer load failed: \(error)"); exit(1) }
+            return
+        }
+
         let modelDir = URL(fileURLWithPath: args.count > 2
             ? args[2]
             : "/Volumes/DEV_ARCHIVE/ti2v-5b-measure/models/ti2v-5b-bf16")
