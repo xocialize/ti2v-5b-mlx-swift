@@ -48,9 +48,14 @@ struct RunTI2V5B {
                 ? args[2] : "a golden retriever puppy running across a sunny meadow"
             do {
                 let tok = try await AutoTokenizer.from(pretrained: "google/umt5-xxl")
-                let ids = tok.encode(text: prompt)
-                print("Swift tokenizer (\(ids.count) ids): \(ids)")
-            } catch { print("✗ tokenizer load failed: \(error)"); exit(1) }
+                let posIds = tok.encode(text: cleanText(prompt))
+                print("Swift POS (\(posIds.count) ids): \(posIds)")
+                // The Chinese negative prompt — the ftfy/NFKC-sensitive case.
+                let cfg = try WanConfig.load(from: URL(fileURLWithPath:
+                    "/Volumes/DEV_ARCHIVE/ti2v-5b-measure/models/ti2v-5b-bf16/config.json"))
+                let negIds = tok.encode(text: cleanText(cfg.sampleNegPrompt))
+                print("Swift NEG (\(negIds.count) ids): \(negIds.prefix(12))…")
+            } catch { print("✗ tokenizer/config load failed: \(error)"); exit(1) }
             return
         }
 
