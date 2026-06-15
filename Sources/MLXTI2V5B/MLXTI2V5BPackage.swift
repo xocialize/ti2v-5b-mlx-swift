@@ -30,26 +30,35 @@ public final class MLXTI2V5BPackage: ModelPackage {
                 tier: 1
             ),
             requirements: RequirementsManifest(
-                // CORRECTED 2026-06-14: the early bf16 ≈40 / int4 ≈33 GB figures were for the
-                // BROKEN bf16 path (Metal bf16 over-grows the latent at video-scale seqLen →
-                // garbage). Correct output runs the DiT in fp32 COMPUTE. residentBytes must be
-                // the fp32 RUN PEAK (= max(phase)), NOT the weight size.
+                // RE-GROUNDED 2026-06-15 on the MEASURED 720p peak (Xcode agent, int4 5f @
+                // 1280×704, fp32 compute). residentBytes = the OS phys_footprint (task_info), the
+                // governor's true max-simultaneous basis — NOT MLX's `Memory.peakMemory`, which under
+                // the decode cache cap counts cumulative allocations (it read 76 GB while phys was
+                // 41 — misleading post-cap; profiler caveat logged separately).
                 //
-                // ⚠️ INTERIM (512²-class, M5 Max `RunTI2V5B gen` 512²×17): bf16-ckpt→fp32-compute
-                // ≈54 GB, int4-ckpt→int4-weights+fp32-acts ≈37 GB. At 512² the DiT denoise
-                // dominated — but that was a SMALL-SPATIAL artifact: at 720p the WHOLE-SEQUENCE
-                // vae22 decode materializes full-res intermediates and DOMINATES (~118 GB-class
-                // @13f, Xcode-agent measuring 5f/13f peaks + the DiT-vs-decode split now).
-                // **720p peak EXCEEDS the 0.7× production budget (≈96 GB) → TI2V-5B will NOT
-                // admit at 720p until the streaming vae22 decode lands** (or a higher budget
-                // fraction). Re-ground these per-quant numbers on the agent's measured max-phase
-                // peaks. Static-manifest caveat: one figure per quant, not per-res.
+                // The 720p admission was unlocked by capping the buffer cache during decode
+                // (`Memory.cacheLimit = 0` in `decodeLatent`, ti2v c98cdc6): without it the freed
+                // full-res decode intermediates accumulated to phys ~110 GB (> budget); with it,
+                // continuous reclamation collapses the transient high-water → **int4 5f @ 720p =
+                // 41.1 GB phys** (max RSS 35.8), bit-identical output. The earlier "~47.8 GB spatial
+                // decode floor" was itself cache-inflated; the live per-chunk working set is far
+                // lower, so streaming (temporal) decode + the cap bound the decode at ANY length.
+                //
+                // int4 = measured 41 GB + headroom. bf16 (→ fp32 compute) is DERIVED, not measured
+                // at 720p: same fp32 activations as int4, +~17 GB for fp32 DiT weights (20 vs int4's
+                // ~3) → ~58 GB; the peak phase is now the DENOISE (decode is capped). Static-manifest
+                // caveat: one figure per quant, validated at 5f. Higher frame counts raise the
+                // DENOISE activations (seqLen scaling = the chunked-attention wall, separate) — a
+                // chipFloor drop below .max should be validated at the production frame count, not 5f.
                 footprints: [
-                    QuantFootprint(quant: .bf16, residentBytes: 56_000_000_000),  // → fp32 compute
-                    QuantFootprint(quant: .int4, residentBytes: 40_000_000_000),
+                    QuantFootprint(quant: .bf16, residentBytes: 58_000_000_000),  // → fp32 compute (derived)
+                    QuantFootprint(quant: .int4, residentBytes: 45_000_000_000),  // measured 41.1 + headroom
                 ],
                 requiredBackends: [.metalGPU],
                 os: OSRequirement(minMacOS: SemanticVersion(major: 26, minor: 0, patch: 0)),
+                // KEPT .max pending a production-frame-count re-measure: int4 5f is 41 GB (admits with
+                // ~55 GB headroom on the 96.2 GB pro budget, and would fit a 64 GB-class machine), but
+                // 81f denoise activations are unmeasured and scale with seqLen. Drop only after that.
                 chipFloor: .max
             ),
             specialties: [
