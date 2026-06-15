@@ -244,7 +244,14 @@ public final class TI2V5BPipeline: @unchecked Sendable {
     /// whole-sequence decode costs ~27 GB PER LATENT FRAME and OOMs at video length;
     /// chunking to 1 latent frame caps the decode peak ~flat (the 720p memory unlock).
     func decodeLatent(_ latent: MLXArray) -> MLXArray {
-        Device.withDefaultDevice(.cpu) {
+        // Return the denoise phase's cached-but-freed GPU buffers to the OS BEFORE the
+        // decode. phys_footprint (the governor's basis) tracks MLX's buffer-cache
+        // high-water, not just active allocations — so without this the ~30 GB denoise
+        // cache stays mapped and stacks onto the decode peak. This `clearCache` (not DiT
+        // residency) is the operative phys lever; works whether the DiT is resident or
+        // paged. (`latent` is still referenced, so it survives the clear.)
+        MLX.GPU.clearCache()
+        return Device.withDefaultDevice(.cpu) {
             let z = latent.transposed(1, 2, 3, 0).expandedDimensions(axis: 0)
             let video = decodeStreaming22(vaeDecoder, denormalizeLatents22(z))
             eval(video)
