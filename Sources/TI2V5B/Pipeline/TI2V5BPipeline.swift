@@ -11,6 +11,7 @@
 import Foundation
 import MLX
 import MLXNN
+import MLXRandom
 import Tokenizers
 import WanCore
 
@@ -131,8 +132,8 @@ public final class TI2V5BPipeline: @unchecked Sendable {
 
     // MARK: - Generation (task #12)
 
-    /// Text-to-video. Relay: umT5 encode→evict → DiT denoise → vae22 decode.
-    /// - Returns: decoded frames [1, T', H', W', 3] in [-1, 1] (channels-last vae22).
+    /// Text-to-video. Relay: umT5 encode→evict → single-expert DiT denoise → vae22
+    /// decode. Returns decoded frames [1, T', H', W', 3] in [-1, 1] (channels-last).
     public func t2v(
         prompt: String,
         negativePrompt: String? = nil,
@@ -141,13 +142,59 @@ public final class TI2V5BPipeline: @unchecked Sendable {
         numFrames: Int = TI2V5BDefaults.numFrames,
         steps: Int? = nil,
         guideScale: Double? = nil,
-        seed: UInt64? = nil
+        scheduler: TI2VScheduler = .unipc,
+        seed: UInt64? = nil,
+        onStep: ((Int, Int, MLXArray) throws -> Void)? = nil
     ) throws -> MLXArray {
-        // Wiring sketch (task #12):
-        //   let contexts = try withTextEncoder { enc in encodePrompt(enc, prompt, neg) }
-        //   let latent = denoise(contexts, shape, steps, guideScale, seed)   // sampler
-        //   return vaeDecoder(denormalizeLatents22(latent))
-        throw TI2V5BError.notImplemented("t2v denoise loop (sampler) — task #12")
+        let negative = negativePrompt ?? config.sampleNegPrompt
+
+        // §2.4: page umT5 in, encode cond/uncond, evict before denoise.
+        let (contextCond, contextNull) = try withTextEncoder { enc -> (MLXArray, MLXArray) in
+            let c = encodeText(
+                encoder: enc, tokenizer: tokenizer, prompt: prompt, textLen: config.textLen)
+            let n = encodeText(
+                encoder: enc, tokenizer: tokenizer, prompt: negative, textLen: config.textLen)
+            eval(c, n)
+            return (c, n)
+        }
+
+        // Latent geometry from the vae strides ([4,16,16]); channels-first.
+        let tLat = (numFrames - 1) / config.vaeStride[0] + 1
+        let hLat = height / config.vaeStride[1]
+        let wLat = width / config.vaeStride[2]
+        if let seed { MLXRandom.seed(seed) }
+        let noise = MLXRandom.normal([config.vaeZDim, tLat, hLat, wLat])
+
+        let latent = try denoiseTI2V(
+            dit: dit, config: config, contextCond: contextCond, contextNull: contextNull,
+            noise: noise, steps: steps ?? config.sampleSteps, shift: config.sampleShift,
+            guideScale: guideScale ?? (config.sampleGuideScale.first ?? 5.0),
+            scheduler: scheduler, onStep: onStep)
+
+        return decodeLatent(latent)
+    }
+
+    /// Text-to-image = single-frame t2v. Returns [1, 1, H', W', 3] in [-1, 1].
+    public func t2i(
+        prompt: String, negativePrompt: String? = nil,
+        width: Int = TI2V5BDefaults.width, height: Int = TI2V5BDefaults.height,
+        steps: Int? = nil, guideScale: Double? = nil, seed: UInt64? = nil
+    ) throws -> MLXArray {
+        try t2v(
+            prompt: prompt, negativePrompt: negativePrompt, width: width, height: height,
+            numFrames: 1, steps: steps, guideScale: guideScale, seed: seed)
+    }
+
+    /// Decode a channels-first DiT latent [C, T_lat, H_lat, W_lat] through vae22:
+    /// → channels-last [1, T_lat, H_lat, W_lat, C] → denormalize → decode → frames
+    /// [1, T', H', W', 3] in [-1, 1]. Run on the CPU stream (fp32 VAE, watchdog-safe).
+    func decodeLatent(_ latent: MLXArray) -> MLXArray {
+        Device.withDefaultDevice(.cpu) {
+            let z = latent.transposed(1, 2, 3, 0).expandedDimensions(axis: 0)
+            let video = vaeDecoder(denormalizeLatents22(z))
+            eval(video)
+            return video
+        }
     }
 
     /// Image+text-to-video. As t2v, but the input image is vae22-encoded to a latent

@@ -1,8 +1,7 @@
-// RunTI2V5B — load-smoke gate for the TI2V-5B scaffold. Loads config + single-expert
-// DiT + vae22 (decoder & encoder) from a converted checkpoint and prints what landed,
-// proving the wiring + weight-key contracts hold end-to-end. Generation is task #12.
-//
-//   swift run RunTI2V5B [modelDir]
+// RunTI2V5B — smoke gate for the TI2V-5B port.
+//   swift run -c release RunTI2V5B [load|t2v] [modelDir]
+//     load (default): load config + DiT + vae22 + tokenizer; prove the key contracts.
+//     t2v          : a tiny end-to-end text→image generation (the full relay).
 // Defaults to the bf16 measure checkpoint on DEV_ARCHIVE.
 
 import Foundation
@@ -14,8 +13,9 @@ import WanCore
 struct RunTI2V5B {
     static func main() async {
         let args = CommandLine.arguments
-        let modelDir = URL(fileURLWithPath: args.count > 1
-            ? args[1]
+        let mode = args.count > 1 ? args[1] : "load"
+        let modelDir = URL(fileURLWithPath: args.count > 2
+            ? args[2]
             : "/Volumes/DEV_ARCHIVE/ti2v-5b-measure/models/ti2v-5b-bf16")
 
         guard FileManager.default.fileExists(
@@ -34,11 +34,25 @@ struct RunTI2V5B {
                 + "dual=\(c.dualModel) vaeZ=\(c.vaeZDim)")
             print("✓ DiT (WanModel) loaded: \(pipe.dit.blocks.count) blocks, dim \(pipe.dit.dim)")
             print("✓ vae22 decoder + encoder loaded (fp32)")
-            print("✓ tokenizer: umt5-xxl")
-            print("✓ §2.4 umT5 eviction wired (paged in per request, not resident)")
-            print("scaffold OK — denoise loop + i2v are task #12")
+            print("✓ tokenizer: umt5-xxl   ✓ §2.4 umT5 eviction wired")
+
+            if mode == "t2v" {
+                // Tiny end-to-end: 256×256, 1 frame, 4 steps — exercises the whole
+                // relay (umT5 encode→evict → 30-block DiT CFG denoise → vae22 decode).
+                print("\nt2v smoke: 256×256, 1 frame, 4 steps …")
+                let frames = try pipe.t2i(
+                    prompt: "a red cube on a white table",
+                    width: 256, height: 256, steps: 4, guideScale: 5.0, seed: 0)
+                eval(frames)
+                let lo = frames.min().item(Float.self)
+                let hi = frames.max().item(Float.self)
+                print("✓ t2v frames \(frames.shape) range [\(lo), \(hi)] (expect ⊆ [-1,1])")
+                print("relay OK — full TI2V-5B text→image generation runs end-to-end")
+            } else {
+                print("scaffold OK — pass 't2v' to run a tiny end-to-end generation")
+            }
         } catch {
-            print("✗ load failed: \(error)")
+            print("✗ failed: \(error)")
             exit(1)
         }
     }
