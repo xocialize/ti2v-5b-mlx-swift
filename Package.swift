@@ -19,11 +19,15 @@ let package = Package(
     ],
     products: [
         .library(name: "TI2V5B", targets: ["TI2V5B"]),
-        // .library(name: "MLXTI2V5B", targets: ["MLXTI2V5B"]),  // #12: ModelPackage wrapper
+        // The MLXEngine wrapper: a conformant `ModelPackage` over the core pipeline.
+        .library(name: "MLXTI2V5B", targets: ["MLXTI2V5B"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.30.0"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.1.6"),
+        // MLXEngine contract (MLXToolKit) for the wrapper target — local-path-style dep
+        // like the other model wrappers; the core `TI2V5B` target stays engine-agnostic.
+        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.4.0"),
         // The neutral Wan substrate (DiT + vae22 + umT5 + RoPE + schedulers + loader).
         .package(path: "../wan-core-mlx-swift"),
     ],
@@ -39,6 +43,15 @@ let package = Package(
                 .product(name: "Tokenizers", package: "swift-transformers"),
             ],
             path: "Sources/TI2V5B"
+        ),
+        .target(
+            name: "MLXTI2V5B",
+            dependencies: [
+                "TI2V5B",
+                .product(name: "WanCore", package: "wan-core-mlx-swift"),
+                .product(name: "MLXToolKit", package: "mlx-engine-swift"),
+            ],
+            path: "Sources/MLXTI2V5B"
         ),
         .executableTarget(
             name: "RunTI2V5B",
