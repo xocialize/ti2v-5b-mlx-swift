@@ -265,7 +265,13 @@ public final class TI2V5BPipeline: @unchecked Sendable {
         Memory.cacheLimit = capMB * 1_000_000
         defer { Memory.cacheLimit = prevCacheLimit }
         MLX.GPU.clearCache()  // drop the denoise cache before the capped decode begins
-        return Device.withDefaultDevice(.cpu) {
+        // DECODE_DEVICE=gpu opts the streaming vae22 decode onto the GPU stream (the 16-ch VACE win:
+        // >27 min CPU → 46.6 s GPU, bounded, no watchdog at chunkLat=1). Default stays .cpu here:
+        // unlike the 16-ch path, the 48-ch vae22 720p GPU-decode envelope (~76 GB active per the note
+        // above; a heavier single-chunk command buffer) is NOT yet validated for watchdog/OOM — flip
+        // the default once the testing agent confirms GPU vae22 decode at 720p.
+        let decodeDevice: Device = (ProcessInfo.processInfo.environment["DECODE_DEVICE"] == "gpu") ? .gpu : .cpu
+        return Device.withDefaultDevice(decodeDevice) {
             let z = latent.transposed(1, 2, 3, 0).expandedDimensions(axis: 0)
             let video = decodeStreaming22(vaeDecoder, denormalizeLatents22(z))
             eval(video)
