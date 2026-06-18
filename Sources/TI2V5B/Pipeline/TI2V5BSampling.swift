@@ -151,6 +151,7 @@ public func denoiseTI2V(
 
         eval(latents)
         MLX.GPU.clearCache()  // per-step buffer-cache discipline (long configs)
+        WanDebug.stats("denoise step \(i + 1)/\(steps)", latents)  // WAN_DEBUG_STATS (latent divergence/zeroing)
         try onStep?(i, steps, latents)
     }
     return latents
