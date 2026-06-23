@@ -27,7 +27,7 @@ let package = Package(
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.1.6"),
         // MLXEngine contract (MLXToolKit) for the wrapper target — local-path-style dep
         // like the other model wrappers; the core `TI2V5B` target stays engine-agnostic.
-        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.4.0"),
+        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.9.1"),
         // The neutral Wan substrate (DiT + vae22 + umT5 + RoPE + schedulers + loader).
         .package(path: "../wan-core-mlx-swift"),
     ],
