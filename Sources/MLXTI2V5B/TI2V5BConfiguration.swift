@@ -45,3 +45,13 @@ public struct TI2V5BConfiguration: PackageConfiguration, ModelStorable, QuantCon
         case repo, revision, quant
     }
 }
+
+/// Cold-start weight prewarm (engine ≥0.7.0): page the resolved flat checkpoint into the OS file
+/// cache before `load()`'s GPU evals, so a cold load-time `eval` never faults weights off
+/// slow/external storage inside a live Metal command buffer (the cold-load GPU watchdog,
+/// `kIOGPUCommandBufferCallbackErrorTimeout`). TI2V-5B is a ~33–40 GB-tier load; the whole resolved
+/// `modelDirectory` is paged. Only the config knows the path, execution is the engine's
+/// (`WeightPrewarmer`, best-effort). Nil on the HF-download path → no-op.
+extension TI2V5BConfiguration: WeightPrewarming {
+    public var prewarmPaths: [URL] { [modelDirectory].compactMap { $0 } }
+}
