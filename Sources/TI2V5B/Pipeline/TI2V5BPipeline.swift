@@ -196,13 +196,15 @@ public final class TI2V5BPipeline: @unchecked Sendable {
         let negative = negativePrompt ?? config.sampleNegPrompt
 
         // §2.4: page umT5 in, encode cond/uncond, evict before denoise.
-        let (contextCond, contextNull) = try withTextEncoder { enc -> (MLXArray, MLXArray) in
-            let c = encodeText(
-                encoder: enc, tokenizer: tokenizer, prompt: prompt, textLen: config.textLen)
-            let n = encodeText(
-                encoder: enc, tokenizer: tokenizer, prompt: negative, textLen: config.textLen)
-            eval(c, n)
-            return (c, n)
+        let (contextCond, contextNull) = try WanProfiler.shared.region("phase", "text_encode") {
+            try withTextEncoder { enc -> (MLXArray, MLXArray) in
+                let c = encodeText(
+                    encoder: enc, tokenizer: tokenizer, prompt: prompt, textLen: config.textLen)
+                let n = encodeText(
+                    encoder: enc, tokenizer: tokenizer, prompt: negative, textLen: config.textLen)
+                eval(c, n)
+                return (c, n)
+            }
         }
 
         // Latent geometry from the vae strides ([4,16,16]); channels-first.
@@ -212,17 +214,19 @@ public final class TI2V5BPipeline: @unchecked Sendable {
         if let seed { MLXRandom.seed(seed) }
         let noise = MLXRandom.normal([config.vaeZDim, tLat, hLat, wLat])
 
-        let latent = try withDiT { dit -> MLXArray in
-            let l = try denoiseTI2V(
-                dit: dit, config: config, contextCond: contextCond, contextNull: contextNull,
-                noise: noise, steps: steps ?? config.sampleSteps, shift: config.sampleShift,
-                guideScale: guideScale ?? (config.sampleGuideScale.first ?? 5.0),
-                scheduler: scheduler, onStep: onStep)
-            eval(l)  // §2.12: materialize before the DiT is evicted for the decode
-            return l
+        let latent = try WanProfiler.shared.region("phase", "denoise") {
+            try withDiT { dit -> MLXArray in
+                let l = try denoiseTI2V(
+                    dit: dit, config: config, contextCond: contextCond, contextNull: contextNull,
+                    noise: noise, steps: steps ?? config.sampleSteps, shift: config.sampleShift,
+                    guideScale: guideScale ?? (config.sampleGuideScale.first ?? 5.0),
+                    scheduler: scheduler, onStep: onStep)
+                eval(l)  // §2.12: materialize before the DiT is evicted for the decode
+                return l
+            }
         }
 
-        return decodeLatent(latent)
+        return WanProfiler.shared.region("phase", "decode") { decodeLatent(latent) }
     }
 
     /// Text-to-image = single-frame t2v. Returns [1, 1, H', W', 3] in [-1, 1].

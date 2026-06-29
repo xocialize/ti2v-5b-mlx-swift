@@ -42,6 +42,10 @@ struct RunTI2V5B {
         let args = CommandLine.arguments
         let mode = args.count > 1 ? args[1] : "load"
 
+        // `--profile` is self-contained: set WAN_PROFILE before the lazy `WanProfiler.shared`
+        // singleton is first touched (only the generate path touches it). Mirrors RunVACE.
+        if args.contains("--profile") { setenv("WAN_PROFILE", "1", 1) }
+
         // Tokenizer-only parity check (no model load).
         if mode == "tok" {
             let prompt = args.count > 2
@@ -149,6 +153,18 @@ struct RunTI2V5B {
                 print("✓ frames \(frames.shape) range [\(lo), \(hi)]")
                 print("✓ wall \(String(format: "%.1f", secs))s  peak GPU \(String(format: "%.1f", peakGB)) GB")
                 print("✓ saved frame 0 → \(outURL.path)")
+
+                if WanProfiler.shared.enabled {
+                    // seqLen from vae strides [4,16,16] + DiT patchSize [1,2,2] → grid /32 spatial.
+                    let tLat = (nf - 1) / 4 + 1
+                    let seqLen = tLat * (h / 32) * (w / 32)
+                    print("\n========== WanProfiler CSV (TI2V-5B t2v) ==========")
+                    WanProfiler.shared.dumpCSV(denominators: [
+                        "step": Double(st),
+                        "frame": Double(nf),
+                        "1k_token": Double(seqLen) / 1000.0,
+                    ])
+                }
             } else if mode == "t2v" {
                 // Tiny end-to-end: 256×256, 1 frame, 4 steps — exercises the whole
                 // relay (umT5 encode→evict → 30-block DiT CFG denoise → vae22 decode).

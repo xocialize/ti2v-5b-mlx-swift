@@ -104,6 +104,20 @@ public func denoiseTI2V(
     // i2v: blend the frozen image latent into frame 0 before denoising.
     if let i2v { latents = (1 - i2v.mask) * i2v.zImg + i2v.mask * latents }
 
+    // Cap the buffer cache during the denoise — TI2V-5B's HEAVY phase (large seqLen ⇒ fp32
+    // SDPA in every block, per wan-core `Attention`). The per-step `clearCache` reclaims at step
+    // boundaries, but only `Memory.cacheLimit` bounds the IN-step high-water — freed block
+    // transients otherwise accumulate toward the peak. Mirrors VACE's `DENOISE_CACHE_MB` lever
+    // (the TI2V decode-cap recipe applied to TI2V's own heavy phase). Env `DENOISE_CACHE_MB`
+    // overrides (0 = max reclaim); restored after the loop.
+    let prevDenoiseCacheLimit = Memory.cacheLimit
+    let denoiseCapMB = ProcessInfo.processInfo.environment["DENOISE_CACHE_MB"].flatMap { Int($0) } ?? 2048
+    Memory.cacheLimit = denoiseCapMB * 1_000_000
+    defer { Memory.cacheLimit = prevDenoiseCacheLimit }
+    // Per-step profiler note (WAN_PROFILE=1): one DiT forward (CFG-batched B=2 or 1) + scheduler
+    // step. seqLen is the headline cost driver — N steps × this is the whole generation wall.
+    let stepNote = "seqLen=\(seqLen) cfg=\(cfg ? 2 : 1)"
+
     for i in 0..<steps {
         let t = Double(timesteps[i])
 
@@ -122,34 +136,38 @@ public func denoiseTI2V(
             return batch == 1 ? tTokens : concatenated([tTokens, tTokens], axis: 0)
         }
 
-        let noisePred: MLXArray
-        if cfg {
-            let preds = dit(
-                [latents, latents], t: timestepArray(batch: 2), context: .embedded(contextCfg),
-                seqLen: seqLen, crossKVCaches: crossKV, ropeCosSin: ropeCosSin)
-            noisePred = preds[1] + Float(guideScale) * (preds[0] - preds[1])
-        } else {
-            let preds = dit(
-                [latents], t: timestepArray(batch: 1), context: .embedded(contextCfg),
-                seqLen: seqLen, crossKVCaches: crossKV, ropeCosSin: ropeCosSin)
-            noisePred = preds[0]
-        }
+        // Coarse per-step timer (WAN_PROFILE=1): the body self-`eval`s, so region wall-clock is
+        // honest. Deep per-block breakdown via WAN_PROFILE_DEEP=blocks (shared wan-core runBlocks).
+        WanProfiler.shared.region("denoise", "step", index: i, note: stepNote) {
+            let noisePred: MLXArray
+            if cfg {
+                let preds = dit(
+                    [latents, latents], t: timestepArray(batch: 2), context: .embedded(contextCfg),
+                    seqLen: seqLen, crossKVCaches: crossKV, ropeCosSin: ropeCosSin)
+                noisePred = preds[1] + Float(guideScale) * (preds[0] - preds[1])
+            } else {
+                let preds = dit(
+                    [latents], t: timestepArray(batch: 1), context: .embedded(contextCfg),
+                    seqLen: seqLen, crossKVCaches: crossKV, ropeCosSin: ropeCosSin)
+                noisePred = preds[0]
+            }
 
-        let predB = noisePred.expandedDimensions(axis: 0)
-        let sampleB = latents.expandedDimensions(axis: 0)
-        let stepped: MLXArray
-        if let unipc {
-            stepped = unipc.step(modelOutput: predB, timestep: Float(t), sample: sampleB)
-        } else if let euler {
-            stepped = euler.step(modelOutput: predB, timestep: Float(t), sample: sampleB)
-        } else {
-            stepped = dpmpp!.step(modelOutput: predB, timestep: Float(t), sample: sampleB)
-        }
-        latents = stepped.squeezed(axis: 0)
-        // i2v: re-freeze the image frame after each step.
-        if let i2v { latents = (1 - i2v.mask) * i2v.zImg + i2v.mask * latents }
+            let predB = noisePred.expandedDimensions(axis: 0)
+            let sampleB = latents.expandedDimensions(axis: 0)
+            let stepped: MLXArray
+            if let unipc {
+                stepped = unipc.step(modelOutput: predB, timestep: Float(t), sample: sampleB)
+            } else if let euler {
+                stepped = euler.step(modelOutput: predB, timestep: Float(t), sample: sampleB)
+            } else {
+                stepped = dpmpp!.step(modelOutput: predB, timestep: Float(t), sample: sampleB)
+            }
+            latents = stepped.squeezed(axis: 0)
+            // i2v: re-freeze the image frame after each step.
+            if let i2v { latents = (1 - i2v.mask) * i2v.zImg + i2v.mask * latents }
 
-        eval(latents)
+            eval(latents)
+        }
         MLX.GPU.clearCache()  // per-step buffer-cache discipline (long configs)
         WanDebug.stats("denoise step \(i + 1)/\(steps)", latents)  // WAN_DEBUG_STATS (latent divergence/zeroing)
         try onStep?(i, steps, latents)
