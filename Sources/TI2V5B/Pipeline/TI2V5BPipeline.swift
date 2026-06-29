@@ -273,7 +273,19 @@ public final class TI2V5BPipeline: @unchecked Sendable {
         let decodeDevice: Device = (ProcessInfo.processInfo.environment["DECODE_DEVICE"] == "gpu") ? .gpu : .cpu
         return Device.withDefaultDevice(decodeDevice) {
             let z = latent.transposed(1, 2, 3, 0).expandedDimensions(axis: 0)
-            let video = decodeStreaming22(vaeDecoder, denormalizeLatents22(z))
+            // DECODE_SPATIAL_TILES bounds the high-res suffix's per-frame spatial peak (E4
+            // Phase-2: bit-identical halo-tile + crop, wan-core `decodeStreaming22`). DEFAULT
+            // 1 = OFF — the 720p single-chunk path is already memory-bounded on a 128 GB box
+            // (the cacheLimit cap above); spatial tiling's win is 1024²+ / small-RAM tiers.
+            // "auto" derives n from the latent H/W (capped maxN=4 for video — multi-chunk keeps
+            // the per-tile temporal caches live, a ~U-curve in n). An explicit int overrides.
+            // DECODE_TILE_HALO overrides the suffix halo (≥ RF 10; default 12).
+            let tilesEnv = ProcessInfo.processInfo.environment["DECODE_SPATIAL_TILES"]
+            let tiles = tilesEnv == "auto"
+                ? suggestSpatialTiles22(hLat: z.dim(2), wLat: z.dim(3), maxN: 4)
+                : (tilesEnv.flatMap { Int($0) } ?? 1)
+            let halo = ProcessInfo.processInfo.environment["DECODE_TILE_HALO"].flatMap { Int($0) }
+            let video = decodeStreaming22(vaeDecoder, denormalizeLatents22(z), spatialTiles: tiles, halo: halo)
             eval(video)
             return video
         }
