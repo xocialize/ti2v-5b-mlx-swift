@@ -108,6 +108,9 @@ public final class MLXTI2V5BPackage: ModelPackage {
     }
 
     public func run(_ request: any CapabilityRequest) async throws -> any CapabilityResponse {
+        // CAN-1: the entry checkpoint is the FIRST act of run() — before the notLoaded
+        // guard, capability validation, or dispatch (run-lifecycle program, engine 0.27.0).
+        try Task.checkCancellation()
         guard let pipeline else { throw PackageError.notLoaded }
         switch request.capability {
         case .textToImage:
@@ -139,7 +142,13 @@ public final class MLXTI2V5BPackage: ModelPackage {
             height: request.height ?? 704,
             steps: sampling.steps,
             guideScale: request.guidanceScale,
-            seed: request.seed)
+            seed: request.seed
+        ) { _, _, _ in
+            try Task.checkCancellation()  // C13: per-denoising-step cancellation
+        }
+        // Post-core checkpoint: the streaming vae22 decode bails per temporal chunk
+        // (non-throwing) — discard a truncated result and rethrow here.
+        try Task.checkCancellation()
         // vae22 yields ≥1 frame per latent frame (the still is frame 0). Channels-last
         // [1, T, H, W, 3] → frame 0 is [H, W, 3].
         let (data, width, height) = try encodePNG(frame: frames[0, 0, 0..., 0..., 0...])
@@ -175,6 +184,9 @@ public final class MLXTI2V5BPackage: ModelPackage {
                 guideScale: request.guidanceScale, scheduler: sampling.scheduler,
                 seed: request.seed, onStep: onStep)
         }
+        // Post-core checkpoint: the streaming vae22 decode bails per temporal chunk
+        // (non-throwing) — discard a truncated result and rethrow here.
+        try Task.checkCancellation()
         return try await framesToVideoResponse(frames, fps: fps)
     }
 

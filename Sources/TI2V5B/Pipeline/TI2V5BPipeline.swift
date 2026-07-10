@@ -233,11 +233,12 @@ public final class TI2V5BPipeline: @unchecked Sendable {
     public func t2i(
         prompt: String, negativePrompt: String? = nil,
         width: Int = TI2V5BDefaults.width, height: Int = TI2V5BDefaults.height,
-        steps: Int? = nil, guideScale: Double? = nil, seed: UInt64? = nil
+        steps: Int? = nil, guideScale: Double? = nil, seed: UInt64? = nil,
+        onStep: ((Int, Int, MLXArray) throws -> Void)? = nil
     ) throws -> MLXArray {
         try t2v(
             prompt: prompt, negativePrompt: negativePrompt, width: width, height: height,
-            numFrames: 1, steps: steps, guideScale: guideScale, seed: seed)
+            numFrames: 1, steps: steps, guideScale: guideScale, seed: seed, onStep: onStep)
     }
 
     /// Decode a channels-first DiT latent [C, T_lat, H_lat, W_lat] through vae22:
