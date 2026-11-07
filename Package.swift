@@ -30,7 +30,7 @@ let package = Package(
         // `TI2V5B` target stays engine-agnostic.
         .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.27.0"),
         // The neutral Wan substrate (DiT + vae22 + umT5 + RoPE + schedulers + loader).
-        .package(url: "https://github.com/xocialize/wan-core-mlx-swift", from: "0.4.0"),
+        .package(url: "https://github.com/xocialize/wan-core-mlx-swift", from: "0.5.0"),
     ],
     targets: [
         .target(

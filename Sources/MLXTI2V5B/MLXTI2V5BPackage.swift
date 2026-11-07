@@ -45,12 +45,13 @@ public final class MLXTI2V5BPackage: ModelPackage {
                 // lower, so streaming (temporal) decode + the cap bound the decode at ANY length.
                 //
                 // int4 = measured 41 GB + headroom (5f). bf16 = bf16 DiT compute since 2026-11-06
-                // (was fp32): MEASURED at the production shape — 1280×704, 81f, 40 steps, mlx-swift
-                // 0.32.3, wan-core 0.4.0 — peak phys_footprint 53.1 GB (`time -l`; 48.2 GB at 5f) →
-                // 58 GB with headroom (AB-R-0787 + re-check). For reference the old fp32-compute path
-                // measured 63.0 GB at 81f, above the 58 GB it was declared at.
+                // (was fp32) + GPU vae22 decode since wan-core 0.5.0 (was CPU): MEASURED end-to-end at
+                // the production shape — 1280×704, 81f, 40 steps, mlx-swift 0.32.3 — peak
+                // phys_footprint 48.2 GB (`time -l`; also 48.2 GB at 5f: the denoise phase is the peak,
+                // the capped GPU decode is ~28 GB) → 53 GB with headroom. With DECODE_DEVICE=cpu the
+                // 81f peak was 53.1 GB; the old fp32-compute path measured 63.0 GB.
                 footprints: [
-                    QuantFootprint(quant: .bf16, residentBytes: 58_000_000_000),  // bf16 compute, measured 53.1 @ 81f 720p
+                    QuantFootprint(quant: .bf16, residentBytes: 53_000_000_000),  // bf16 + GPU decode, measured 48.2 @ 81f 720p
                     QuantFootprint(quant: .int4, residentBytes: 45_000_000_000),  // measured 41.1 + headroom
                 ],
                 requiredBackends: [.metalGPU],

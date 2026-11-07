@@ -244,7 +244,8 @@ public final class TI2V5BPipeline: @unchecked Sendable {
 
     /// Decode a channels-first DiT latent [C, T_lat, H_lat, W_lat] through vae22:
     /// → channels-last [1, T_lat, H_lat, W_lat, C] → denormalize → STREAMING decode →
-    /// frames [1, T', H', W', 3] in [-1, 1]. Run on the CPU stream (fp32 VAE).
+    /// frames [1, T', H', W', 3] in [-1, 1]. Runs on the GPU stream by default (fp32 VAE;
+    /// `DECODE_DEVICE=cpu` for the CPU stream).
     ///
     /// Uses `decodeStreaming22` (temporal-chunked, bit-identical to whole-seq) — the
     /// whole-sequence decode costs ~27 GB PER LATENT FRAME and OOMs at video length;
@@ -271,12 +272,13 @@ public final class TI2V5BPipeline: @unchecked Sendable {
         Memory.cacheLimit = capMB * 1_000_000
         defer { Memory.cacheLimit = prevCacheLimit }
         MLX.GPU.clearCache()  // drop the denoise cache before the capped decode begins
-        // DECODE_DEVICE=gpu opts the streaming vae22 decode onto the GPU stream (the 16-ch VACE win:
-        // >27 min CPU → 46.6 s GPU, bounded, no watchdog at chunkLat=1). Default stays .cpu here:
-        // unlike the 16-ch path, the 48-ch vae22 720p GPU-decode envelope (~76 GB active per the note
-        // above; a heavier single-chunk command buffer) is NOT yet validated for watchdog/OOM — flip
-        // the default once the testing agent confirms GPU vae22 decode at 720p.
-        let decodeDevice: Device = (ProcessInfo.processInfo.environment["DECODE_DEVICE"] == "gpu") ? .gpu : .cpu
+        // Decode device: GPU by default since 2026-11-06 (`DECODE_DEVICE=cpu` opts back). wan-core
+        // ≥ 0.5.0 routes vae22's in-window 3×3 convs through ExactConv on the GPU (mlx's Winograd
+        // conv2d is lossy on NAX, AB-A-0113), so the GPU decode matches the CPU one: 81f 720p
+        // PSNR 90.6 dB vs the CPU frames (the lossy kernel gave 64 dB), 137.7 s vs ~1975 s on the
+        // CPU, 27.9 GB peak phys decode-only. Memory was already validated flat in frame count
+        // with this 2 GB cache cap (June: 13f/49f ~59 GB end-to-end).
+        let decodeDevice: Device = (ProcessInfo.processInfo.environment["DECODE_DEVICE"] == "cpu") ? .cpu : .gpu
         return Device.withDefaultDevice(decodeDevice) {
             let z = latent.transposed(1, 2, 3, 0).expandedDimensions(axis: 0)
             // DECODE_SPATIAL_TILES bounds the high-res suffix's per-frame spatial peak (E4
