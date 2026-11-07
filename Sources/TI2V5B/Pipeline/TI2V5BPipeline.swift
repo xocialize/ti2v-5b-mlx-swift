@@ -49,12 +49,13 @@ public final class TI2V5BPipeline: @unchecked Sendable {
     /// Load all components from a converted checkpoint directory (flat layout:
     /// `model.safetensors` + `vae.safetensors` + `t5_encoder.safetensors` +
     /// `config.json`). The tokenizer comes from google/umt5-xxl (HF), like mlx-video.
-    /// - ditDType: the DiT compute precision. Defaults to **fp32** — REQUIRED for correct
-    ///   video-scale (large-seqLen) output: Metal bf16 attention over long sequences is
-    ///   numerically unstable (NaN) AND, even mitigated, too imprecise (the latent
-    ///   over-grows; fp32 matches the oracle). bf16 is fine only for small-seqLen (e.g.
-    ///   single-frame t2i) — pass `.bfloat16` there to halve the DiT footprint. Ignored
-    ///   for quantized checkpoints (the quant path owns dtype).
+    /// - ditDType: the DiT compute precision. Defaults to **bf16** since 2026-11-06. The June
+    ///   "bf16 is unstable at video scale" finding (NaN / latent over-growth / neon smear) was
+    ///   the NAX split-K bf16 GEMM miscompile in `ffn.fc2` on mlx-swift ≤ 0.31.6 (AB-R-0778),
+    ///   fixed in 0.32.3. Measured on 0.32.3 at 1280×704, 40 steps: bf16 vs fp32 frames
+    ///   43.3 dB PSNR at 5f and 38.4 dB at 81f, visually identical, ~10 GB lower footprint
+    ///   (AB-R-0787). Pass `.float32` for oracle-parity work (fp32 matches the mlx-video
+    ///   trajectory exactly). Ignored for quantized checkpoints (the quant path owns dtype).
     /// - pageDiT: when true, the DiT is NOT held resident — it is paged in per request
     ///   for denoise and evicted before the VAE decode (§2.12 max-phase: peak =
     ///   max(umT5, DiT, decode) not their sum). The consumer-tier memory lever (costs a
@@ -62,7 +63,7 @@ public final class TI2V5BPipeline: @unchecked Sendable {
     ///   runs / high-memory tiers).
     public static func fromPretrained(
         modelDir: URL, quantization explicitQuantization: WanQuantization? = nil,
-        ditDType: DType = .float32, pageDiT: Bool = false
+        ditDType: DType = .bfloat16, pageDiT: Bool = false
     ) async throws -> TI2V5BPipeline {
         let config = try WanConfig.load(
             from: modelDir.appendingPathComponent("config.json"))
@@ -85,7 +86,7 @@ public final class TI2V5BPipeline: @unchecked Sendable {
             quantization: quantization, ditDType: ditDType)
     }
 
-    /// Build + load a single-expert DiT (fp32 compute for video-scale correctness; int4
+    /// Build + load a single-expert DiT (bf16 by default, fp32 on request; int4
     /// keeps the quant path). Drops the stray int4 `freqs` table.
     static func loadDiT(
         modelDir: URL, config: WanConfig, quantization: WanQuantization?, ditDType: DType

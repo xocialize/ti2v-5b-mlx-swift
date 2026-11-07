@@ -44,21 +44,19 @@ public final class MLXTI2V5BPackage: ModelPackage {
                 // decode floor" was itself cache-inflated; the live per-chunk working set is far
                 // lower, so streaming (temporal) decode + the cap bound the decode at ANY length.
                 //
-                // int4 = measured 41 GB + headroom. bf16 (→ fp32 compute) is DERIVED, not measured
-                // at 720p: same fp32 activations as int4, +~17 GB for fp32 DiT weights (20 vs int4's
-                // ~3) → ~58 GB; the peak phase is now the DENOISE (decode is capped). Static-manifest
-                // caveat: one figure per quant, validated at 5f. Higher frame counts raise the
-                // DENOISE activations (seqLen scaling = the chunked-attention wall, separate) — a
-                // chipFloor drop below .max should be validated at the production frame count, not 5f.
+                // int4 = measured 41 GB + headroom (5f). bf16 = bf16 DiT compute since 2026-11-06
+                // (was fp32): MEASURED at the production shape — 1280×704, 81f, 40 steps, mlx-swift
+                // 0.32.3, wan-core 0.4.0 — peak phys_footprint 53.1 GB (`time -l`; 48.2 GB at 5f) →
+                // 58 GB with headroom (AB-R-0787 + re-check). For reference the old fp32-compute path
+                // measured 63.0 GB at 81f, above the 58 GB it was declared at.
                 footprints: [
-                    QuantFootprint(quant: .bf16, residentBytes: 58_000_000_000),  // → fp32 compute (derived)
+                    QuantFootprint(quant: .bf16, residentBytes: 58_000_000_000),  // bf16 compute, measured 53.1 @ 81f 720p
                     QuantFootprint(quant: .int4, residentBytes: 45_000_000_000),  // measured 41.1 + headroom
                 ],
                 requiredBackends: [.metalGPU],
                 os: OSRequirement(minMacOS: SemanticVersion(major: 26, minor: 0, patch: 0)),
-                // KEPT .max pending a production-frame-count re-measure: int4 5f is 41 GB (admits with
-                // ~55 GB headroom on the 96.2 GB pro budget, and would fit a 64 GB-class machine), but
-                // 81f denoise activations are unmeasured and scale with seqLen. Drop only after that.
+                // KEPT .max: bf16 81f is now measured (53.1 GB), but int4 81f is not, and a chipFloor
+                // change is a product decision — revisit with an int4 81f measurement.
                 chipFloor: .max
             ),
             specialties: [

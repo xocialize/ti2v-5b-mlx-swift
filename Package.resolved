@@ -1,5 +1,5 @@
 {
-  "originHash" : "a5338036718f514a9abf45b816e9f5277fbce04dace27e9536092cbd6ba5ad18",
+  "originHash" : "a6c4e934a1ecfee238e4d1edaaffe585779670328dc75c441e0e02388eed9818",
   "pins" : [
     {
       "identity" : "eventsource",
@@ -132,8 +132,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/xocialize/wan-core-mlx-swift",
       "state" : {
-        "revision" : "a7632c30a81e6e5d40e6f11c02b3b85d7e906271",
-        "version" : "0.3.0"
+        "revision" : "52440f81d3c58745744ec638bf00ef4c7d85458f",
+        "version" : "0.4.0"
       }
     },
     {
